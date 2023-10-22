@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+## Description: Simple wrapper script to download topic reader export files from S3 / Rundeck and have them properly named.
+#
+# Requirements: wget, perl 5, sed, cut, detox
+
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  >&2 echo "Usage: $(basename "$0") URL_TO_S3_BY_RUNDECK"
+  exit 1
+fi
+
+url="$1"
+
+# for the final file name we need to look into the file, thus we start by downloading it
+# and use a simpler version of the final file name that we can be derived before looking into the file
+timestamp=$(date +%s)
+filename="tmp.${timestamp}_$(echo "$url" | sed -r 's/(.*)TOPIC_EXPORTER_(.*)_(.*)_STAGE(.*)/\3_\2/').txt"
+
+wget --dns-timeout=5 --connect-timeout=7 --retry-connrefused --tries=3 --continue --no-check-certificate "${url}" -O "${filename}"
+
+# sorry dear CRs/CRLFs but you have to go. I live in a LF world.
+perl -pi -e 's/\r\n?$/\n/g' "${filename}"
+
+# All values are required to be set
+environment=$(sed '1q;d' "${filename}" | sed -r 's/environment[[:space:]]*\:[[:space:]](.*)/\1/')
+topic=$(sed '2q;d' "${filename}" | sed -r 's/topic[[:space:]]*\:[[:space:]](.*)/\1/')
+searchValue=$(sed '3q;d' "${filename}" | sed -r 's/searchValue[[:space:]]*\:[[:space:]](.*)/\1/')
+timeFrom=$(sed '4q;d' "${filename}" | sed -r 's/timeFrom[[:space:]]*\:[[:space:]](.*)/\1/' | cut -c -16 | sed -r 's/[-:]//g') 
+timeTo=$(sed '5q;d' "${filename}" | sed -r 's/timeTo[[:space:]]*\:[[:space:]](.*)/\1/' | cut -c -16 | sed -r 's/[-:]//g')
+
+# Like the way links to topic reader export files presented on Rundeck to users their default filename is not that user
+# friendly either. Thus, we attempt to have a look at the included metadata lines of the file to come up with a more
+# useful name.
+#
+#  Format:  <environment>_<topic>_<searchValue>_<formattedTimeFrom>_<formattedTimeTo>.txt
+#
+#  Example: DEV_comp.os.minix_test1_20230520T0730_20230521T1255.txt
+#
+# Let's try to break down one of the above assignments ("timesTo") to understand what is happening here:
+#
+# timeTo=$(sed '5q;d' $filename | sed -r 's/timeTo[[:space:]]*\:[[:space:]](.*)/\1/' | cut -c -16 | sed -r 's/[-:]//g')
+#
+#  * sed '5q;d' $filename => output line number 5 from file $filename
+#  * sed -r 's/timeTo[[:space:]]*\:[[:space:]](.*)/\1/' => "grep" for some colon separated field identifier and extract
+#     the value  after the colon
+#  * cut -c -16 => some values like timeFrom and timeTo can be rather long (2023-08-07T00:00:00.0000000). Here we reduce
+#     the value to its first 16 chars - basically to get the date and time including hours and minutes but nothing else.
+#  * sed -r 's/[-:]//g' => finally replace some characters (like : and -) to make the datetime appear more readable in
+#    file names.
+# 
+# construct the final file name. again, we use sed to replace other potentially fancy chars with something simpler (_).
+sanitized_filename=$(echo "${environment}_${topic}_${searchValue}_${timeFrom}_${timeTo}.txt"| sed -e 's/[^A-Za-z0-9._-]/_/g')
+
+mv "${filename}" "${sanitized_filename}"
+
+detox -v "${sanitized_filename}"
